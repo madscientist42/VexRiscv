@@ -9,13 +9,14 @@ import spinal.lib._
 import spinal.lib.bus.amba3.apb._
 import spinal.lib.bus.amba4.axi._
 import spinal.lib.com.jtag.Jtag
-import spinal.lib.com.uart.{Uart, UartCtrlGenerics, UartCtrlMemoryMappedConfig, Apb3UartCtrl}
+import spinal.lib.com.uart.{Apb3UartCtrl, Uart, UartCtrlGenerics, UartCtrlMemoryMappedConfig}
 import spinal.lib.graphic.RgbConfig
-import spinal.lib.graphic.vga.{Vga, Axi4VgaCtrlGenerics, Axi4VgaCtrl}
+import spinal.lib.graphic.vga.{Axi4VgaCtrl, Axi4VgaCtrlGenerics, Vga}
 import spinal.lib.io.TriStateArray
 import spinal.lib.memory.sdram._
-import spinal.lib.soc.pinsec.{PinsecTimerCtrlExternal, PinsecTimerCtrl}
-import spinal.lib.system.debugger.{SystemDebugger, JtagBridge, JtagAxi4SharedDebugger, SystemDebuggerConfig}
+import spinal.lib.misc.HexTools
+import spinal.lib.soc.pinsec.{PinsecTimerCtrl, PinsecTimerCtrlExternal}
+import spinal.lib.system.debugger.{JtagAxi4SharedDebugger, JtagBridge, SystemDebugger, SystemDebuggerConfig}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -53,6 +54,8 @@ object BrieyConfig{
         //            catchAccessFault = true
         //          ),
         new IBusCachedPlugin(
+          resetVector = 0x80000000l,
+          prediction = STATIC,
           config = InstructionCacheConfig(
             cacheSize = 4096,
             bytePerLine =32,
@@ -64,7 +67,8 @@ object BrieyConfig{
             catchAccessFault = true,
             catchMemoryTranslationMiss = true,
             asyncTagMemory = false,
-            twoCycleRam = true
+            twoCycleRam = true,
+            twoCycleCache = true
           )
           //            askMemoryTranslation = true,
           //            memoryTranslatorPortConfig = MemoryTranslatorPortConfig(
@@ -108,7 +112,7 @@ object BrieyConfig{
           separatedAddSub = false,
           executeInsertion = true
         ),
-        new FullBarrielShifterPlugin,
+        new FullBarrelShifterPlugin,
         new MulPlugin,
         new DivPlugin,
         new HazardSimplePlugin(
@@ -122,8 +126,7 @@ object BrieyConfig{
         ),
         new BranchPlugin(
           earlyBranch = false,
-          catchAddressMisaligned = true,
-          prediction = STATIC
+          catchAddressMisaligned = true
         ),
         new CsrPlugin(
           config = CsrPluginConfig(
@@ -388,6 +391,21 @@ object Briey{
     })
   }
 }
+
+//DE1-SoC with memory init
+object BrieyWithMemoryInit{
+  def main(args: Array[String]) {
+    val config = SpinalConfig()
+    config.generateVerilog({
+      val toplevel = new Briey(BrieyConfig.default)
+      toplevel.axi.vgaCtrl.vga.ctrl.io.error.addAttribute(Verilator.public)
+      toplevel.axi.vgaCtrl.vga.ctrl.io.frameStart.addAttribute(Verilator.public)
+      HexTools.initRam(toplevel.axi.ram.ram, "src/main/ressource/hex/muraxDemo.hex", 0x80000000l)
+      toplevel
+    })
+  }
+}
+
 
 //DE0-Nano
 object BrieyDe0Nano{

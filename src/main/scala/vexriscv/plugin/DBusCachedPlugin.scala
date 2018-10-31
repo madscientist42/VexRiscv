@@ -18,7 +18,9 @@ class DAxiCachedPlugin(config : DataCacheConfig, memoryTranslatorPortConfig : An
   }
 }
 
-class DBusCachedPlugin(config : DataCacheConfig, memoryTranslatorPortConfig : Any = null)  extends Plugin[VexRiscv]{
+class DBusCachedPlugin(config : DataCacheConfig,
+                       memoryTranslatorPortConfig : Any = null,
+                       csrInfo : Boolean = false)  extends Plugin[VexRiscv]{
   import config._
   var dBus  : DataCacheMemBus = null
   var mmuBus : MemoryTranslatorBus = null
@@ -95,7 +97,7 @@ class DBusCachedPlugin(config : DataCacheConfig, memoryTranslatorPortConfig : An
       MEMORY_MANAGMENT -> True
     ))
 
-    mmuBus = pipeline.service(classOf[MemoryTranslator]).newTranslationPort(pipeline.memory,memoryTranslatorPortConfig)
+    mmuBus = pipeline.service(classOf[MemoryTranslator]).newTranslationPort(MemoryTranslatorPort.PRIORITY_DATA ,memoryTranslatorPortConfig)
 
     if(catchSomething)
       exceptionBus = pipeline.service(classOf[ExceptionService]).newExceptionPort(pipeline.writeBack)
@@ -171,6 +173,7 @@ class DBusCachedPlugin(config : DataCacheConfig, memoryTranslatorPortConfig : An
       arbitration.haltItself setWhen(cache.io.cpu.memory.haltIt)
 
       cache.io.cpu.memory.mmuBus <> mmuBus
+      arbitration.haltItself setWhen (mmuBus.cmd.isValid && !mmuBus.rsp.hit && !mmuBus.rsp.miss)
     }
 
     writeBack plug new Area{
@@ -213,7 +216,12 @@ class DBusCachedPlugin(config : DataCacheConfig, memoryTranslatorPortConfig : An
       when(arbitration.isValid && input(MEMORY_ENABLE)) {
         output(REGFILE_WRITE_DATA) := rspFormated
       }
-   }
+    }
+
+    if(csrInfo){
+      val csr = service(classOf[CsrPlugin])
+      csr.r(0xCC0, 0 ->  U(cacheSize/wayCount),  20 ->  U(bytePerLine))
+    }
   }
 }
 

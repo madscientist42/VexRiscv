@@ -3,7 +3,7 @@ package vexriscv.demo
 import spinal.core._
 import spinal.lib.bus.amba3.apb.{Apb3, Apb3Config, Apb3SlaveFactory}
 import spinal.lib.bus.misc.SizeMapping
-import spinal.lib.misc.{InterruptCtrl, Prescaler, Timer}
+import spinal.lib.misc.{HexTools, InterruptCtrl, Prescaler, Timer}
 import spinal.lib._
 import vexriscv.plugin.{DBusSimpleBus, IBusSimpleBus}
 
@@ -64,7 +64,7 @@ class MuraxMasterArbiter(simpleBusConfig : SimpleBusConfig) extends Component{
     io.masterBus.cmd.valid := False
   }
 
-  io.iBus.rsp.ready := io.masterBus.rsp.valid && !rspTarget
+  io.iBus.rsp.valid := io.masterBus.rsp.valid && !rspTarget
   io.iBus.rsp.inst  := io.masterBus.rsp.data
   io.iBus.rsp.error := False
 
@@ -72,7 +72,6 @@ class MuraxMasterArbiter(simpleBusConfig : SimpleBusConfig) extends Component{
   io.dBus.rsp.data  := io.masterBus.rsp.data
   io.dBus.rsp.error := False
 }
-
 
 
 class MuraxSimpleBusRam(onChipRamSize : BigInt, onChipRamHexFile : String, simpleBusConfig : SimpleBusConfig) extends Component{
@@ -92,39 +91,7 @@ class MuraxSimpleBusRam(onChipRamSize : BigInt, onChipRamHexFile : String, simpl
   io.bus.cmd.ready := True
 
   if(onChipRamHexFile != null){
-    def readHexFile(path : String, callback : (Int, Int) => Unit): Unit ={
-      import scala.io.Source
-      def hToI(that : String, start : Int, size : Int) = Integer.parseInt(that.substring(start,start + size), 16)
-
-      var offset = 0
-      for (line <- Source.fromFile(path).getLines) {
-        if (line.charAt(0) == ':'){
-          val byteCount = hToI(line, 1, 2)
-          val nextAddr = hToI(line, 3, 4) + offset
-          val key = hToI(line, 7, 2)
-          key match {
-            case 0 =>
-              for(i <- 0 until byteCount){
-                callback(nextAddr + i, hToI(line, 9 + i * 2, 2))
-              }
-            case 2 =>
-              offset = hToI(line, 9, 4) << 4
-            case 4 =>
-              offset = hToI(line, 9, 4) << 16
-            case 3 =>
-            case 5 =>
-            case 1 =>
-          }
-        }
-      }
-    }
-
-    val initContent = Array.fill[BigInt](ram.wordCount)(0)
-    readHexFile(onChipRamHexFile,(address,data) => {
-      val addressWithoutOffset = address + Int.MinValue
-      initContent(addressWithoutOffset >> 2) |= BigInt(data) << ((addressWithoutOffset & 3)*8)
-    })
-    ram.initBigInt(initContent)
+    HexTools.initRam(ram, onChipRamHexFile, 0x80000000l)
   }
 }
 
@@ -163,7 +130,7 @@ class MuraxSimpleBusToApbBridge(apb3Config: Apb3Config, pipelineBridge : Boolean
   }
 }
 
-class MuraxSimpleBusDecoder(master : SimpleBus, specification : List[(SimpleBus,SizeMapping)], pipelineMaster : Boolean) extends Area{
+class MuraxSimpleBusDecoder(master : SimpleBus, val specification : List[(SimpleBus,SizeMapping)], pipelineMaster : Boolean) extends Area{
   val masterPipelined = SimpleBus(master.config)
   if(!pipelineMaster) {
     masterPipelined.cmd << master.cmd

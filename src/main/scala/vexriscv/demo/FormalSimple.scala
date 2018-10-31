@@ -13,13 +13,12 @@ object FormalSimple extends App{
       plugins = List(
         new FormalPlugin,
         new HaltOnExceptionPlugin,
-        new PcManagerSimplePlugin(
-          resetVector = 0x00000000l,
-          relaxedPcCalculation = false
-        ),
         new IBusSimplePlugin(
-          interfaceKeepData = false,
-          catchAccessFault = false
+          resetVector = 0x00000000l,
+          relaxedPcCalculation = false,
+          prediction = DYNAMIC_TARGET,
+          catchAccessFault = false,
+          compressedGen = true
         ),
         new DBusSimplePlugin(
           catchAddressMisaligned = true,
@@ -38,7 +37,7 @@ object FormalSimple extends App{
           separatedAddSub = false,
           executeInsertion = false
         ),
-        new FullBarrielShifterPlugin,
+        new FullBarrelShifterPlugin,
         new HazardSimplePlugin(
           bypassExecute           = false,
           bypassMemory            = false,
@@ -50,8 +49,7 @@ object FormalSimple extends App{
         ),
         new BranchPlugin(
           earlyBranch = false,
-          catchAddressMisaligned = true,
-          prediction = NONE
+          catchAddressMisaligned = true
         ),
         new YamlPlugin("cpu0.yaml")
       )

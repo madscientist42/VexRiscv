@@ -3,8 +3,9 @@ package vexriscv.ip
 import vexriscv._
 import spinal.core._
 import spinal.lib._
-import spinal.lib.bus.amba4.axi.{Axi4ReadOnly, Axi4Config}
-import spinal.lib.bus.avalon.{AvalonMMConfig, AvalonMM}
+import spinal.lib.bus.amba4.axi.{Axi4Config, Axi4ReadOnly}
+import spinal.lib.bus.avalon.{AvalonMM, AvalonMMConfig}
+import spinal.lib.bus.wishbone.{Wishbone, WishboneConfig}
 
 
 case class InstructionCacheConfig( cacheSize : Int,
@@ -17,10 +18,12 @@ case class InstructionCacheConfig( cacheSize : Int,
                                    catchAccessFault : Boolean,
                                    catchMemoryTranslationMiss : Boolean,
                                    asyncTagMemory : Boolean,
+                                   twoCycleCache : Boolean = true,
                                    twoCycleRam : Boolean = false,
                                    preResetFlush : Boolean = false){
 
-  def dataOnDecode = twoCycleRam && wayCount > 1
+  assert(!(twoCycleRam && !twoCycleCache))
+
   def burstSize = bytePerLine*8/memDataWidth
   def catchSomething = catchAccessFault || catchMemoryTranslationMiss || catchIllegalAccess
 
@@ -42,6 +45,20 @@ case class InstructionCacheConfig( cacheSize : Int,
     constantBurstBehavior = true
   )
 
+  def getWishboneConfig() = WishboneConfig(
+    addressWidth = 30,
+    dataWidth = 32,
+    selWidth = 4,
+    useSTALL = false,
+    useLOCK = false,
+    useERR = true,
+    useRTY = false,
+    tgaWidth = 0,
+    tgcWidth = 0,
+    tgdWidth = 0,
+    useBTE = true,
+    useCTI = true
+  )
 }
 
 
@@ -57,36 +74,46 @@ case class InstructionCacheCpuPrefetch(p : InstructionCacheConfig) extends Bundl
   }
 }
 
-case class InstructionCacheCpuFetch(p : InstructionCacheConfig) extends Bundle with IMasterSlave {
+trait InstructionCacheCommons{
+  val isValid : Bool
+  val isStuck : Bool
+  val pc : UInt
+  val physicalAddress : UInt
+  val data   : Bits
+  val cacheMiss, error, mmuMiss, illegalAccess,isUser : Bool
+}
+
+case class InstructionCacheCpuFetch(p : InstructionCacheConfig) extends Bundle with IMasterSlave with InstructionCacheCommons {
   val isValid = Bool
   val isStuck = Bool
+  val isRemoved = Bool
   val pc = UInt(p.addressWidth bits)
   val data    =  Bits(p.cpuDataWidth bits)
   val mmuBus  = MemoryTranslatorBus()
+  val physicalAddress = UInt(p.addressWidth bits)
+  val cacheMiss, error, mmuMiss, illegalAccess,isUser  = ifGen(!p.twoCycleCache)(Bool)
 
   override def asMaster(): Unit = {
-    out(isValid, isStuck, pc)
-    inWithNull(data)
+    out(isValid, isStuck, isRemoved, pc)
+    inWithNull(error,mmuMiss,illegalAccess,data, cacheMiss,physicalAddress)
+    outWithNull(isUser)
     slaveWithNull(mmuBus)
   }
 }
 
 
-case class InstructionCacheCpuDecode(p : InstructionCacheConfig) extends Bundle with IMasterSlave {
+case class InstructionCacheCpuDecode(p : InstructionCacheConfig) extends Bundle with IMasterSlave with InstructionCacheCommons {
   val isValid = Bool
-  val isUser  = Bool
   val isStuck  = Bool
   val pc = UInt(p.addressWidth bits)
-  val cacheMiss  = Bool
-  val data  =  ifGen(p.dataOnDecode) (Bits(p.cpuDataWidth bits))
-  val error   =  Bool
-  val mmuMiss   =  Bool
-  val illegalAccess =Bool
+  val physicalAddress = UInt(p.addressWidth bits)
+  val data  =  Bits(p.cpuDataWidth bits)
+  val cacheMiss, error, mmuMiss, illegalAccess, isUser  = ifGen(p.twoCycleCache)(Bool)
 
   override def asMaster(): Unit = {
-    out(isValid, isUser, isStuck, pc)
-    in(cacheMiss)
-    inWithNull(error,mmuMiss,illegalAccess,data)
+    out(isValid, isStuck, pc)
+    outWithNull(isUser)
+    inWithNull(error,mmuMiss,illegalAccess,data, cacheMiss, physicalAddress)
   }
 }
 
@@ -94,9 +121,10 @@ case class InstructionCacheCpuBus(p : InstructionCacheConfig) extends Bundle wit
   val prefetch = InstructionCacheCpuPrefetch(p)
   val fetch = InstructionCacheCpuFetch(p)
   val decode = InstructionCacheCpuDecode(p)
+  val fill = Flow(UInt(p.addressWidth bits))
 
   override def asMaster(): Unit = {
-    master(prefetch, fetch, decode)
+    master(prefetch, fetch, decode, fill)
   }
 }
 
@@ -148,6 +176,36 @@ case class InstructionCacheMemBus(p : InstructionCacheConfig) extends Bundle wit
     rsp.data := mm.readData
     rsp.error := mm.response =/= AvalonMM.Response.OKAY
     mm
+  }
+
+  def toWishbone(): Wishbone = {
+    val wishboneConfig = p.getWishboneConfig()
+    val bus = Wishbone(wishboneConfig)
+    val counter = Reg(UInt(log2Up(p.burstSize) bits)) init(0)
+    val pending = counter =/= 0
+    val lastCycle = counter === counter.maxValue
+
+    bus.ADR := (cmd.address >> widthOf(counter) + 2) @@ counter
+    bus.CTI := lastCycle ? B"111" | B"010"
+    bus.BTE := "00"
+    bus.SEL := "1111"
+    bus.WE  := False
+    bus.DAT_MOSI.assignDontCare()
+    bus.CYC := False
+    bus.STB := False
+    when(cmd.valid || pending){
+      bus.CYC := True
+      bus.STB := True
+      when(bus.ACK){
+        counter := counter + 1
+      }
+    }
+
+    cmd.ready := cmd.valid && bus.ACK
+    rsp.valid := RegNext(bus.CYC && bus.ACK) init(False)
+    rsp.data := RegNext(bus.DAT_MISO)
+    rsp.error := False //TODO
+    bus
   }
 }
 
@@ -217,6 +275,11 @@ class InstructionCache(p : InstructionCacheConfig) extends Component{
     val valid = RegInit(False) clearWhen(fire)
     val address = Reg(UInt(addressWidth bits))
     val hadError = RegInit(False) clearWhen(fire)
+
+    when(io.cpu.fill.valid){
+      valid := True
+      address := io.cpu.fill.payload
+    }
 
     io.cpu.prefetch.haltIt setWhen(valid)
 
@@ -302,6 +365,9 @@ class InstructionCache(p : InstructionCacheConfig) extends Component{
       val data = read.waysValues.map(_.data).read(id)
       val word = data.subdivideIn(cpuDataWidth bits).read(io.cpu.fetch.pc(memWordToCpuWordRange))
       io.cpu.fetch.data := word
+      if(twoCycleCache){
+        io.cpu.decode.data := RegNextWhen(io.cpu.fetch.data,!io.cpu.decode.isStuck)
+      }
     } else null
 
     if(twoCycleRam && wayCount == 1){
@@ -311,10 +377,23 @@ class InstructionCache(p : InstructionCacheConfig) extends Component{
     io.cpu.fetch.mmuBus.cmd.isValid := io.cpu.fetch.isValid
     io.cpu.fetch.mmuBus.cmd.virtualAddress := io.cpu.fetch.pc
     io.cpu.fetch.mmuBus.cmd.bypassTranslation := False
+    io.cpu.fetch.mmuBus.end := !io.cpu.fetch.isStuck || io.cpu.fetch.isRemoved
+    io.cpu.fetch.physicalAddress := io.cpu.fetch.mmuBus.rsp.physicalAddress
+
+    val resolution = ifGen(!twoCycleCache)( new Area{
+//      def stage[T <: Data](that : T) = RegNextWhen(that,!io.cpu.decode.isStuck)
+      val mmuRsp = io.cpu.fetch.mmuBus.rsp
+
+      io.cpu.fetch.cacheMiss := !hit.valid
+      io.cpu.fetch.error := hit.error
+      io.cpu.fetch.mmuMiss := mmuRsp.miss
+      io.cpu.fetch.illegalAccess := !mmuRsp.allowExecute || (io.cpu.fetch.isUser && !mmuRsp.allowUser)
+    })
   }
 
 
-  val decodeStage = new Area{
+
+  val decodeStage = ifGen(twoCycleCache) (new Area{
     def stage[T <: Data](that : T) = RegNextWhen(that,!io.cpu.decode.isStuck)
     val mmuRsp = stage(io.cpu.fetch.mmuBus.rsp)
 
@@ -327,23 +406,23 @@ class InstructionCache(p : InstructionCacheConfig) extends Component{
       val valid = Cat(hits).orR
       val id = OHToUInt(hits)
       val error = tags(id).error
-      if(dataOnDecode) {
-        val data = fetchStage.read.waysValues.map(way => stage(way.data)).read(id)
-        val word = data.subdivideIn(cpuDataWidth bits).read(io.cpu.decode.pc(memWordToCpuWordRange))
-        io.cpu.decode.data := word
-      }
+      val data = fetchStage.read.waysValues.map(way => stage(way.data)).read(id)
+      val word = data.subdivideIn(cpuDataWidth bits).read(io.cpu.decode.pc(memWordToCpuWordRange))
+      io.cpu.decode.data := word
     }
 
     io.cpu.decode.cacheMiss := !hit.valid
-    when( io.cpu.decode.isValid && io.cpu.decode.cacheMiss){
-      io.cpu.prefetch.haltIt := True
-      lineLoader.valid := True
-      lineLoader.address := mmuRsp.physicalAddress //Could be optimise if mmu not used
-    }
+//    when( io.cpu.decode.isValid && io.cpu.decode.cacheMiss){
+//      io.cpu.prefetch.haltIt := True
+//      lineLoader.valid := True
+//      lineLoader.address := mmuRsp.physicalAddress //Could be optimise if mmu not used
+//    }
+//    when(io.cpu)
 
     io.cpu.decode.error := hit.error
     io.cpu.decode.mmuMiss := mmuRsp.miss
     io.cpu.decode.illegalAccess := !mmuRsp.allowExecute || (io.cpu.decode.isUser && !mmuRsp.allowUser)
-  }
+    io.cpu.decode.physicalAddress := mmuRsp.physicalAddress
+  })
 }
 

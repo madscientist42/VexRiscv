@@ -12,13 +12,13 @@ object GenNoCacheNoMmuMaxPerf extends App{
   def cpu() = new VexRiscv(
     config = VexRiscvConfig(
       plugins = List(
-        new PcManagerSimplePlugin(
-          resetVector = 0x80000000l,
-          relaxedPcCalculation = false
-        ),
         new IBusSimplePlugin(
-          interfaceKeepData = false,
-          catchAccessFault = true
+          resetVector = 0x80000000l,
+          relaxedPcCalculation = false,
+          prediction = DYNAMIC_TARGET,
+          historyRamSizeLog2 = 8,
+          catchAccessFault = true,
+          compressedGen = false
         ),
         new DBusSimplePlugin(
           catchAddressMisaligned = true,
@@ -33,14 +33,14 @@ object GenNoCacheNoMmuMaxPerf extends App{
         ),
         new RegFilePlugin(
           regFileReadyKind = plugin.SYNC,
-          zeroBoot = false
+          zeroBoot = true
         ),
         new IntAluPlugin,
         new SrcPlugin(
           separatedAddSub = false,
           executeInsertion = true
         ),
-        new FullBarrielShifterPlugin(earlyInjection = true),
+        new FullBarrelShifterPlugin(earlyInjection = true),
         new HazardSimplePlugin(
           bypassExecute           = true,
           bypassMemory            = true,
@@ -56,9 +56,7 @@ object GenNoCacheNoMmuMaxPerf extends App{
         new DebugPlugin(ClockDomain.current.clone(reset = Bool().setName("debugReset"))),
         new BranchPlugin(
           earlyBranch = true,
-          catchAddressMisaligned = true,
-          prediction = DYNAMIC_TARGET,
-          historyRamSizeLog2 = 8
+          catchAddressMisaligned = true
         ),
         new YamlPlugin("cpu0.yaml")
       )

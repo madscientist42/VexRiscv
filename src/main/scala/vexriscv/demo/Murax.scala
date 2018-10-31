@@ -52,13 +52,12 @@ object MuraxConfig{
     pipelineApbBridge     = true,
     gpioWidth = 32,
     cpuPlugins = ArrayBuffer( //DebugPlugin added by the toplevel
-      new PcManagerSimplePlugin(
-        resetVector = 0x80000000l,
-        relaxedPcCalculation = true
-      ),
       new IBusSimplePlugin(
-        interfaceKeepData = false,
-        catchAccessFault = false
+        resetVector = 0x80000000l,
+        relaxedPcCalculation = true,
+        prediction = NONE,
+        catchAccessFault = false,
+        compressedGen = false
       ),
       new DBusSimplePlugin(
         catchAddressMisaligned = false,
@@ -90,8 +89,7 @@ object MuraxConfig{
       ),
       new BranchPlugin(
         earlyBranch = false,
-        catchAddressMisaligned = false,
-        prediction = NONE
+        catchAddressMisaligned = false
       ),
       new YamlPlugin("cpu0.yaml")
     ),
@@ -127,7 +125,7 @@ object MuraxConfig{
       bypassWriteBack = true,
       bypassWriteBackBuffer = true
     )
-//    config.cpuPlugins(config.cpuPlugins.indexWhere(_.isInstanceOf[LightShifterPlugin])) = new FullBarrielShifterPlugin()
+//    config.cpuPlugins(config.cpuPlugins.indexWhere(_.isInstanceOf[LightShifterPlugin])) = new FullBarrelShifterPlugin()
 
     config
   }
@@ -291,7 +289,7 @@ case class Murax(config : MuraxConfig) extends Component{
 
 object Murax{
   def main(args: Array[String]) {
-    SpinalVerilog(InOutWrapper(Murax(MuraxConfig.default)))
+    SpinalVerilog(Murax(MuraxConfig.default))
   }
 }
 
@@ -310,11 +308,17 @@ object MuraxDhrystoneReadyMulDivStatic{
       config.cpuPlugins.remove(config.cpuPlugins.indexWhere(_.isInstanceOf[BranchPlugin]))
       config.cpuPlugins +=new BranchPlugin(
         earlyBranch = false,
-        catchAddressMisaligned = false,
-        prediction = STATIC
+        catchAddressMisaligned = false
+      )
+      config.cpuPlugins += new IBusSimplePlugin(
+        resetVector = 0x80000000l,
+        relaxedPcCalculation = true,
+        prediction = STATIC,
+        catchAccessFault = false,
+        compressedGen = false
       )
       config.cpuPlugins.remove(config.cpuPlugins.indexWhere(_.isInstanceOf[LightShifterPlugin]))
-      config.cpuPlugins += new FullBarrielShifterPlugin
+      config.cpuPlugins += new FullBarrelShifterPlugin
       Murax(config)
     })
   }

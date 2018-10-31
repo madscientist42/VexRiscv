@@ -54,6 +54,8 @@ case class CsrPluginConfig(
 
                           ){
   assert(!ucycleAccess.canWrite)
+
+  def noException = this.copy(ecallGen = false, catchIllegalAccess = false)
 }
 
 object CsrPluginConfig{
@@ -260,7 +262,7 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
     if(ecallGen) decoderService.add(ECALL,  defaultEnv ++ List(ENV_CTRL -> EnvCtrlEnum.ECALL))
 
     val  pcManagerService = pipeline.service(classOf[JumpService])
-    jumpInterface = pcManagerService.createJumpInterface(pipeline.execute)
+    jumpInterface = pcManagerService.createJumpInterface(pipeline.writeBack)
     jumpInterface.valid := False
     jumpInterface.payload.assignDontCare()
 
@@ -291,7 +293,7 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
   override def build(pipeline: VexRiscv): Unit = {
     import pipeline._
     import pipeline.config._
-
+    val fetcher = service(classOf[IBusFetcher])
 
     pipeline plug new Area{
       //Define CSR mapping utilities
@@ -312,7 +314,8 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
         val base = Reg(UInt(2 bits)) init(U"01") allowUnsetRegToAvoidLatch
         val extensions = Reg(Bits(26 bits)) init(misaExtensionsInit) allowUnsetRegToAvoidLatch
       }
-      val mtvec = RegInit(U(mtvecInit,xlen bits)) allowUnsetRegToAvoidLatch
+      val mtvec = Reg(UInt(xlen bits)).allowUnsetRegToAvoidLatch
+      if(mtvecInit != null) mtvec init(mtvecInit)
       val mepc = Reg(UInt(xlen bits))
       val mstatus = new Area{
         val MIE, MPIE = RegInit(False)
@@ -371,26 +374,15 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
         minstret := minstret + 1
       }
 
-
-
-      //Used to make the pipeline empty softly (for interrupts)
-      val pipelineLiberator = new Area{
-        val enable = False.noBackendCombMerge //Verilator Perf
-        prefetch.arbitration.haltByOther setWhen(enable)
-        val done = ! List(fetch, decode, execute, memory, writeBack).map(_.arbitration.isValid).orR
-      }
-
+      val mepcCaptureStage = if(exceptionPortsInfos.nonEmpty) writeBack else decode
 
 
       //Aggregate all exception port and remove required instructions
       val exceptionPortCtrl = if(exceptionPortsInfos.nonEmpty) new Area{
         val firstStageIndexWithExceptionPort = exceptionPortsInfos.map(i => indexOf(i.stage)).min
-        val exceptionValids = Vec(Bool,stages.length)
-        val exceptionValidsRegs = Vec(Reg(Bool) init(False), stages.length).allowUnsetRegToAvoidLatch
+        val exceptionValids = Vec(stages.map(s => Bool().setPartialName(s.getName())))
+        val exceptionValidsRegs = Vec(stages.map(s => Reg(Bool).init(False).setPartialName(s.getName()))).allowUnsetRegToAvoidLatch
         val exceptionContext = Reg(ExceptionCause())
-        val pipelineHasException = exceptionValids.orR   //TODO FMAX maybe could be partialy pipelined
-
-        pipelineLiberator.enable setWhen(pipelineHasException)
 
         val groupedByStage = exceptionPortsInfos.map(_.stage).distinct.map(s => {
           val stagePortsInfos = exceptionPortsInfos.filter(_.stage == s).sortWith(_.priority > _.priority)
@@ -409,28 +401,36 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
         })
 
         val sortedByStage = groupedByStage.sortWith((a, b) => pipeline.indexOf(a.stage) < pipeline.indexOf(b.stage))
-
+        sortedByStage.zipWithIndex.foreach(e => e._1.port.setName(e._1.stage.getName() + "_exception_agregat"))
         exceptionValids := exceptionValidsRegs
         for(portInfo <- sortedByStage; port = portInfo.port ; stage = portInfo.stage; stageId = indexOf(portInfo.stage)) {
           when(port.valid) {
-            stages(indexOf(stage) - 1).arbitration.flushAll := True
+//            if(indexOf(stage) != 0) stages(indexOf(stage) - 1).arbitration.flushAll := True
             stage.arbitration.removeIt := True
             exceptionValids(stageId) := True
-            exceptionContext := port.payload
+            when(!exceptionValidsRegs.takeRight(stages.length-stageId-1).fold(False)(_ || _)) {
+              exceptionContext := port.payload
+            }
           }
         }
+
         for(stageId <- firstStageIndexWithExceptionPort until stages.length; stage = stages(stageId) ){
           when(stage.arbitration.isFlushed){
             exceptionValids(stageId) := False
           }
+          val previousStage = if(stageId == firstStageIndexWithExceptionPort) stage else stages(stageId-1)
           when(!stage.arbitration.isStuck){
-            exceptionValidsRegs(stageId) := (if(stageId != firstStageIndexWithExceptionPort) exceptionValids(stageId-1) else False)
+            exceptionValidsRegs(stageId) := (if(stageId != firstStageIndexWithExceptionPort) exceptionValids(stageId-1) && !previousStage.arbitration.isStuck else False)
           }otherwise{
             exceptionValidsRegs(stageId) := exceptionValids(stageId)
           }
+
+          if(stageId != 0){
+            when(exceptionValidsRegs(stageId)){
+              stages(stageId-1).arbitration.haltByOther := True
+            }
+          }
         }
-
-
       } else null
 
 
@@ -459,42 +459,34 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
           }
         }
       }
-//      val deteriministicLogic = if(deterministicInteruptionEntry) new Area{
-//        val counter = Reg(UInt(4 bits)) init(0)
-//        val limit = Reg(UInt(4 bits)) init(5)
-//        when(interruptRequest.rise()){
-//          limit :=  CountOne(stages.tail.map(_.arbitration.isValid)).resized
-//        }
-//        when(!interruptRequest || !mstatus.MIE){
-//          counter := 0
-//        } otherwise {
-//          when(counter < limit){
-//            when(writeBack.arbitration.isFiring){
-//              counter := counter + 1
-//            }
-//          }
-//          val counterPlusPending = counter + CountOne(stages.tail.map(_.arbitration.isValid)) + 1
-//          when(counterPlusPending < limit){
-//            inhibateInterrupts()
-//          }
-//        }
-//      }
+
+
+      //Used to make the pipeline empty softly (for interrupts)
+      val pipelineLiberator = new Area{
+        when(interrupt && decode.arbitration.isValid){
+          decode.arbitration.haltByOther := True
+        }
+
+        val done = !List(execute, memory, writeBack).map(_.arbitration.isValid).orR && fetcher.pcValid(mepcCaptureStage)
+        if(exceptionPortCtrl != null) done.clearWhen(exceptionPortCtrl.exceptionValidsRegs.tail.orR)
+      }
 
       //Interrupt/Exception entry logic
-      pipelineLiberator.enable setWhen(interrupt)
-      when(exception || (interrupt && pipelineLiberator.done)){
+      val interruptCode = ((mip.MEIP && mie.MEIE) ? U(11) | ((mip.MSIP && mie.MSIE) ? U(3) | U(7))).addTag(Verilator.public)
+      val interruptJump = Bool.addTag(Verilator.public)
+      interruptJump := interrupt && pipelineLiberator.done
+
+      when(exception || interruptJump){
         jumpInterface.valid := True
         jumpInterface.payload := mtvec
+        memory.arbitration.flushAll := True
+        if(exceptionPortCtrl != null) exceptionPortCtrl.exceptionValidsRegs.last := False
         mstatus.MIE  := False
         mstatus.MPIE := mstatus.MIE
         mstatus.MPP  := privilege
-        mepc := exception mux(
-          True  -> writeBack.input(PC),
-          False -> (writeBackWasWfi ? writeBack.input(PC) | prefetch.input(PC_CALC_WITHOUT_JUMP))
-        )
-
-        mcause.interrupt := interrupt
-        mcause.exceptionCode := ((mip.MEIP && mie.MEIE) ? U(11) | ((mip.MSIP && mie.MSIE) ? U(3) | U(7)))
+        mepc := mepcCaptureStage.input(PC)
+        mcause.interrupt := interruptJump
+        mcause.exceptionCode := interruptCode
       }
 
       when(RegNext(exception)){
@@ -504,12 +496,13 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
 
 
       //Manage MRET instructions
-      when(memory.input(ENV_CTRL) === EnvCtrlEnum.MRET) {
-        memory.arbitration.haltItself := writeBack.arbitration.isValid
-        when(memory.arbitration.isFiring) {
+      when(execute.arbitration.isValid && execute.input(ENV_CTRL) === EnvCtrlEnum.MRET) {
+        when(memory.arbitration.isValid || writeBack.arbitration.isValid){
+          execute.arbitration.haltItself := True
+        } otherwise {
           jumpInterface.valid := True
           jumpInterface.payload := mepc
-          execute.arbitration.flushAll := True
+          decode.arbitration.flushAll := True
           mstatus.MIE := mstatus.MPIE
           privilege := mstatus.MPP
         }
@@ -525,7 +518,6 @@ class CsrPlugin(config : CsrPluginConfig) extends Plugin[VexRiscv] with Exceptio
       if(wfiGen) when(execute.arbitration.isValid && execute.input(ENV_CTRL) === EnvCtrlEnum.WFI){
         when(!interrupt){
           execute.arbitration.haltItself := True
-          decode.arbitration.flushAll := True
         }
       }
 

@@ -44,7 +44,7 @@ case class Masked(value : BigInt,care : BigInt){
   def toString(bitCount : Int) = (0 until bitCount).map(i => if(care.testBit(i)) (if(value.testBit(i)) "1" else "0") else "-").reverseIterator.reduce(_+_)
 }
 
-class DecoderSimplePlugin(catchIllegalInstruction : Boolean, forceLegalInstructionComputation : Boolean = false) extends Plugin[VexRiscv] with DecoderService {
+class DecoderSimplePlugin(catchIllegalInstruction : Boolean = false, forceLegalInstructionComputation : Boolean = false) extends Plugin[VexRiscv] with DecoderService {
   override def add(encoding: Seq[(MaskedLiteral, Seq[(Stageable[_ <: BaseType], Any)])]): Unit = encoding.foreach(e => this.add(e._1,e._2))
   override def add(key: MaskedLiteral, values: Seq[(Stageable[_ <: BaseType], Any)]): Unit = {
     val instructionModel = encodings.getOrElseUpdate(key,ArrayBuffer[(Stageable[_ <: BaseType], BaseType)]())
@@ -277,6 +277,8 @@ object SymplifyBit{
     return trueTerms.forall(trueTerm => terms.exists(_ covers trueTerm))
   }
 
+
+  def getPrimeImplicantsByTrue(trueTerms: Seq[Masked], inputWidth : Int) : Seq[Masked] = getPrimeImplicantsByTrueAndDontCare(trueTerms, Nil, inputWidth)
 
   // Return primes implicants for the trueTerms, default value is False.
   // You can insert don't care values by adding non-prime implicants in the trueTerms

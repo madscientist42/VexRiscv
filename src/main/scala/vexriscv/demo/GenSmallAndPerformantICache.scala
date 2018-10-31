@@ -13,7 +13,7 @@ object GenSmallAndProductiveICache extends App{
     config = VexRiscvConfig(
       plugins = List(
         new PcManagerSimplePlugin(
-          resetVector = 0x00000000l,
+          resetVector = 0x80000000l,
           relaxedPcCalculation = false
         ),
         new IBusCachedPlugin(
@@ -28,7 +28,8 @@ object GenSmallAndProductiveICache extends App{
             catchAccessFault = false,
             catchMemoryTranslationMiss = false,
             asyncTagMemory = false,
-            twoCycleRam = false
+            twoCycleRam = false,
+            twoCycleCache = true
           )
         ),
         new DBusSimplePlugin(
@@ -41,7 +42,7 @@ object GenSmallAndProductiveICache extends App{
         ),
         new RegFilePlugin(
           regFileReadyKind = plugin.SYNC,
-          zeroBoot = false
+          zeroBoot = true
         ),
         new IntAluPlugin,
         new SrcPlugin(
@@ -60,8 +61,7 @@ object GenSmallAndProductiveICache extends App{
         ),
         new BranchPlugin(
           earlyBranch = false,
-          catchAddressMisaligned = false,
-          prediction = NONE
+          catchAddressMisaligned = false
         ),
         new YamlPlugin("cpu0.yaml")
       )
