@@ -24,8 +24,9 @@ case class DataCacheConfig(cacheSize : Int,
                            earlyDataMux : Boolean = false,
                            tagSizeShift : Int = 0, //Used to force infering ram
                            withLrSc : Boolean = false,
-                           withAmo : Boolean = false){
-
+                           withAmo : Boolean = false,
+                           mergeExecuteMemory : Boolean = false){
+  assert(!(mergeExecuteMemory && (earlyDataMux || earlyWaysHits)))
   assert(!(earlyDataMux && !earlyWaysHits))
   def burstSize = bytePerLine*8/memDataWidth
   val burstLength = bytePerLine/(memDataWidth/8)
@@ -184,16 +185,17 @@ case class DataCacheMemBus(p : DataCacheConfig) extends Bundle with IMasterSlave
     slave(rsp)
   }
 
-  def toAxi4Shared(stageCmd : Boolean = false): Axi4Shared = {
+  def toAxi4Shared(stageCmd : Boolean = false, pendingWritesMax  : Int = 7): Axi4Shared = {
     val axi = Axi4Shared(p.getAxi4SharedConfig())
-    val pendingWritesMax = 7
+
+    val cmdPreFork = if (stageCmd) cmd.stage.stage().s2mPipe() else cmd
+
     val pendingWrites = CounterUpDown(
       stateCount = pendingWritesMax + 1,
-      incWhen = axi.sharedCmd.fire && axi.sharedCmd.write,
+      incWhen = cmdPreFork.fire && cmdPreFork.wr,
       decWhen = axi.writeRsp.fire
     )
 
-    val cmdPreFork = if (stageCmd) cmd.stage.stage().s2mPipe() else cmd
     val hazard = (pendingWrites =/= 0 && !cmdPreFork.wr) || pendingWrites === pendingWritesMax
     val (cmdFork, dataFork) = StreamFork2(cmdPreFork.haltWhen(hazard))
     val cmdStage  = cmdFork.throwWhen(RegNextWhen(!cmdFork.last,cmdFork.fire).init(False))
@@ -257,7 +259,7 @@ case class DataCacheMemBus(p : DataCacheConfig) extends Bundle with IMasterSlave
     val cmdBridge = Stream (DataCacheMemCmd(p))
     val isBurst = cmdBridge.length =/= 0
     cmdBridge.valid := cmd.valid
-    cmdBridge.address := (isBurst ? (cmd.address(31 downto widthOf(counter) + 2) @@ counter @@ "00") | (cmd.address(31 downto 2) @@ "00"))
+    cmdBridge.address := (isBurst ? (cmd.address(31 downto widthOf(counter) + 2) @@ counter @@ U"00") | (cmd.address(31 downto 2) @@ U"00"))
     cmdBridge.wr := cmd.wr
     cmdBridge.mask := cmd.mask
     cmdBridge.data := cmd.data
@@ -276,8 +278,8 @@ case class DataCacheMemBus(p : DataCacheConfig) extends Bundle with IMasterSlave
 
     bus.ADR := cmdBridge.address >> 2
     bus.CTI := Mux(isBurst, cmdBridge.last ? B"111" | B"010", B"000")
-    bus.BTE := "00"
-    bus.SEL := cmdBridge.wr ? cmdBridge.mask | "1111"
+    bus.BTE := B"00"
+    bus.SEL := cmdBridge.wr ? cmdBridge.mask | B"1111"
     bus.WE  := cmdBridge.wr
     bus.DAT_MOSI := cmdBridge.data
 
@@ -400,7 +402,7 @@ class DataCache(p : DataCacheConfig) extends Component{
 
     //Writes
     when(tagsWriteCmd.valid && tagsWriteCmd.way(i)){
-      tags(tagsWriteCmd.address) := tagsWriteCmd.data
+      tags.write(tagsWriteCmd.address, tagsWriteCmd.data)
     }
     when(dataWriteCmd.valid && dataWriteCmd.way(i)){
       data.write(
@@ -446,7 +448,7 @@ class DataCache(p : DataCacheConfig) extends Component{
   }
 
   val stageA = new Area{
-    def stagePipe[T <: Data](that : T) = RegNextWhen(that, !io.cpu.memory.isStuck)
+    def stagePipe[T <: Data](that : T) = if(mergeExecuteMemory) CombInit(that) else RegNextWhen(that, !io.cpu.memory.isStuck)
     val request = stagePipe(io.cpu.execute.args)
     val mask = stagePipe(stage0.mask)
     io.cpu.memory.mmuBus.cmd.isValid := io.cpu.memory.isValid
@@ -457,16 +459,22 @@ class DataCache(p : DataCacheConfig) extends Component{
 
     val wayHits = earlyWaysHits generate ways.map(way => (io.cpu.memory.mmuBus.rsp.physicalAddress(tagRange) === way.tagsReadRsp.address && way.tagsReadRsp.valid))
     val dataMux = earlyDataMux generate MuxOH(wayHits, ways.map(_.dataReadRsp))
-    val colisions = stagePipe(stage0.colisions) | collisionProcess(io.cpu.memory.address(lineRange.high downto wordRange.low), mask) //Assume the writeback stage will never be unstall memory acces while memory stage is stalled
+    val colisions = if(mergeExecuteMemory){
+      stagePipe(stage0.colisions)
+    } else {
+      //Assume the writeback stage will never be unstall memory acces while memory stage is stalled
+      stagePipe(stage0.colisions) | collisionProcess(io.cpu.memory.address(lineRange.high downto wordRange.low), mask)
+    }
   }
 
   val stageB = new Area {
     def stagePipe[T <: Data](that : T) = RegNextWhen(that, !io.cpu.writeBack.isStuck)
+    def ramPipe[T <: Data](that : T) = if(mergeExecuteMemory) CombInit(that) else  RegNextWhen(that, !io.cpu.writeBack.isStuck)
     val request = RegNextWhen(stageA.request, !io.cpu.writeBack.isStuck)
     val mmuRspFreeze = False
     val mmuRsp = RegNextWhen(io.cpu.memory.mmuBus.rsp, !io.cpu.writeBack.isStuck && !mmuRspFreeze)
-    val tagsReadRsp = ways.map(w => stagePipe(w.tagsReadRsp))
-    val dataReadRsp = !earlyDataMux generate ways.map(w => stagePipe(w.dataReadRsp))
+    val tagsReadRsp = ways.map(w => ramPipe(w.tagsReadRsp))
+    val dataReadRsp = !earlyDataMux generate ways.map(w => ramPipe(w.dataReadRsp))
     val waysHits = if(earlyWaysHits) stagePipe(B(stageA.wayHits)) else B(tagsReadRsp.map(tag => mmuRsp.physicalAddress(tagRange) === tag.address && tag.valid).asBits())
     val waysHit = waysHits.orR
     val dataMux = if(earlyDataMux) stagePipe(stageA.dataMux) else MuxOH(waysHits, dataReadRsp)
@@ -482,8 +490,7 @@ class DataCache(p : DataCacheConfig) extends Component{
 
     //Evict the cache after reset logics
     val flusher = new Area {
-      val valid = RegInit(True)
-      mmuRsp.physicalAddress init (0)
+      val valid = RegInit(False)
       when(valid) {
         tagsWriteCmd.valid := valid
         tagsWriteCmd.address := mmuRsp.physicalAddress(lineRange)
@@ -498,7 +505,10 @@ class DataCache(p : DataCacheConfig) extends Component{
       }
 
       io.cpu.flush.ready := False
-      when(io.cpu.flush.valid && !io.cpu.execute.isValid && !io.cpu.memory.isValid && !io.cpu.writeBack.isValid && !io.cpu.redo){
+      val start = RegInit(True) //Used to relax timings
+      start := !start && io.cpu.flush.valid && !io.cpu.execute.isValid && !io.cpu.memory.isValid && !io.cpu.writeBack.isValid && !io.cpu.redo
+
+      when(start){
         io.cpu.flush.ready := True
         mmuRsp.physicalAddress.getDrivingReg(lineRange) := 0
         valid := True
